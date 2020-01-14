@@ -80,3 +80,18 @@ class NiiSequence(tf.keras.utils.Sequence):
             return np.stack(data_batch, axis=0), np.stack(label_batch, axis=0)
         else:
             return np.expand_dims(data, axis=0), np.expand_dims(label, axis=0)
+
+        
+# save predicted images in niftii format for later tests and visual checking
+def save_prediction(predicted_batch, rootpath, template_subID, labelname, batch_id=None, subIDs=None):
+    template_img = nibabel.load(rootpath + template_subID + labelname)
+    batch_size = predicted_batch.shape[0]
+    for i in range(batch_size):
+        new_img = nibabel.Nifti1Image(predicted_batch[i, :, :, :, 0], template_img.affine, template_img.header)
+        if subIDs is not None:
+            filename = rootpath + subIDs[i] + '_predicted' + labelname
+        elif batch_id is not None:
+            filename = rootpath + str(batch_id * batch_size + i) + '_predicted' + labelname
+        else:
+            filename = rootpath + str(i) + '_predicted' + labelname
+        nibabel.save(new_img, filename)
