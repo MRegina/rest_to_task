@@ -8,7 +8,7 @@ import tensorflow as tf
 from datetime import datetime
 import os
 
-from utils import NiiSequence, CorrelationMetric, CorrelationLoss
+from utils import NiiSequence, CorrelationMetric, CorrelationLoss, save_prediction
 
 DATA_PATH = 'CNN/'
 TRAIN_SUBIDS = ['100307', '101915', '103414']
