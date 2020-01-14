@@ -94,3 +94,8 @@ model.fit(train_dataset, epochs=EPOCH, validation_data=valid_dataset, callbacks=
 # evaluate on the test set
 test_loss = model.evaluate(test_dataset)
 print(test_loss)
+
+# predict on test data
+predicted_batch = model.predict(test_dataset)
+save_prediction(predicted_batch=predicted_batch, rootpath=DATA_PATH, labelname=TASK_FILE_NAME,
+                template_subID=TEST_SUBIDS[0], subIDs=TEST_SUBIDS)
