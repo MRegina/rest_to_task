@@ -88,6 +88,11 @@ model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
               metrics=[tf.keras.losses.MeanSquaredError(), tf.keras.metrics.MeanAbsoluteError(), CorrelationMetric()])
 model.summary()
 
+# save model architecture in json
+model_json = model.to_json()
+with open(LOGDIR + "\\model.json", "w") as json_file:
+    json_file.write(model_json)
+
 # training loop
 model.fit(train_dataset, epochs=EPOCH, validation_data=valid_dataset, callbacks=[tensorboard_callback, cp_callback])
 
