@@ -7,100 +7,169 @@ Code for 3D task activation regression with convolutional networks based on rest
 import tensorflow as tf
 from datetime import datetime
 import os
+import numpy as np
+import random
+from utils import NiiSequence, create_unet_model3D, CorrelationMetric, CorrelationLoss, save_prediction, \
+    save_prediction_batch, correlation, correlation_thresh, load_nifti, act_pred_corr, correlation
+from sklearn.preprocessing import normalize
+import matplotlib.pyplot as plt
+import pickle
 
-from utils import NiiSequence, CorrelationMetric, CorrelationLoss, save_prediction
+DATA_PATH = '/media/Drobo_HCP/HCP_Data/Volume/'
+OUT_PATH = '/media/Drobo_HCP/HCP_Data/Volume/CNN/Predictions/'
 
-DATA_PATH = 'CNN/'
-TRAIN_SUBIDS = ['100307', '101915', '103414']
-VALID_SUBIDS = ['103818']
-TEST_SUBIDS = ['106319']
-REST_FILE_NAME = '_DR2_nosmoothing.nii.gz'
-TASK_FILE_NAME = '_motor1.nii.gz'
+num_val = 50
+num_test = 50
 
-# otput paths
-LOGDIR = os.path.join("logs\\regress_3D", datetime.now().strftime("%Y%m%d-%H%M%S"))
-os.makedirs(os.path.join(LOGDIR, "checkpoints"), exist_ok=False)
-CHECKPOINT_PATH = os.path.join(LOGDIR, "checkpoints", "cp-{epoch:04d}.ckpt")
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    # Restrict TensorFlow to only allocate 4GB of memory on the first GPU
+    try:
+        tf.config.experimental.set_virtual_device_configuration(
+            gpus[0],
+            [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=4096)])
+        logical_gpus = tf.config.experimental.list_logical_devices('GPU')
+        print(len(gpus), "Physical GPUs,", len(logical_gpus), "Logical GPUs")
+    except RuntimeError as e:
+        # Virtual devices must be set before GPUs have been initialized
+        print(e)
+
+#read in subject IDs for train, validation and test sets
+with open(DATA_PATH + '/CNN/list_train_alltasks.txt') as f:
+    SUBIDS = f.read().split('\n')
+SUBIDS.pop()
+
+with open(DATA_PATH + '/CNN/list_val_alltasks.txt') as f:
+    VALID_SUBIDS = f.read().split('\n')
+VALID_SUBIDS.pop()
+
+with open(DATA_PATH + '/CNN/list_test_alltasks.txt') as f:
+    TEST_SUBIDS = f.read().split('\n')
+TEST_SUBIDS.pop()
+
+
+REST_FILE_NAME = '_DR2_4mm_64.nii.gz'
+TASK_FILE_NAME = 'RELATIONAL'
+TASK_FILE_NUM = '1'
+
 
 BATCH_SIZE = 1
-INPUT_SHAPE = (91, 109, 91, 32)
-OUTPUT_SIZE = (91, 109, 91, 1)
+INPUT_SHAPE = (64, 64, 64, 32)
+OUTPUT_SIZE = (64, 64, 64, 1)
+init_lr=0.0001
 
-# hyperparameters
-LEARNING_RATE = 0.001
-EPOCH = 100
+numfilters = [96]
+kersize = [3]
+numlayers = [2]
+
+num_trainsubjects = [10, 20, 50, 100, 200, 300];
+cc_mean_test_1D = np.zeros((24))
+cc_mean_val_1D = np.zeros((24))
+
+EPOCH = 300
 DROPOUT_RATE = None  # 0.1
-
-# architecture parameters
-filter_num1 = 32  # 96
-filter_num2 = 32  # 64
-filter_num3 = 32  # 32
-
-# tf.config.experimental_run_functions_eagerly(True)
-
-# create datasets
-train_dataset = NiiSequence(TRAIN_SUBIDS, shuffle=True, rootpath=DATA_PATH, dataname=REST_FILE_NAME,
-                            labelname=TASK_FILE_NAME, batch_size=BATCH_SIZE)
-valid_dataset = NiiSequence(VALID_SUBIDS, rootpath=DATA_PATH, dataname=REST_FILE_NAME, labelname=TASK_FILE_NAME,
-                            batch_size=BATCH_SIZE)
-test_dataset = NiiSequence(TEST_SUBIDS, rootpath=DATA_PATH, dataname=REST_FILE_NAME, labelname=TASK_FILE_NAME,
-                           batch_size=BATCH_SIZE)
+batchnorm = False
 
 
-def separable_convolution_3D(x, kernel_size, filter_num, name, activation='relu', dropout_rate=None):
-    conv1 = tf.keras.layers.Conv3D(filters=filter_num, kernel_size=(kernel_size, 1, 1), strides=(1, 1, 1),
-                                   padding='same', kernel_initializer='he_uniform', activation=activation,
-                                   name=name + 'conv1')(x)
-    conv2 = tf.keras.layers.Conv3D(filters=filter_num, kernel_size=(1, kernel_size, 1), strides=(1, 1, 1),
-                                   padding='same', kernel_initializer='he_uniform', activation=activation,
-                                   name=name + 'conv2')(conv1)
-    conv3 = tf.keras.layers.Conv3D(filters=filter_num, kernel_size=(1, 1, kernel_size), strides=(1, 1, 1),
-                                   padding='same', kernel_initializer='he_uniform', activation=activation,
-                                   name=name + 'conv3')(conv2)
-    if dropout_rate is not None:
-        conv3 = tf.keras.layers.SpatialDropout3D(rate=dropout_rate, name=name + 'dropout')(conv3)
-    return conv3
+#setup for gridsearch over hyperparameters
+count = -1
+for layer in numlayers:
+    for ker in kersize:
+        for filt in numfilters:
+            for trainnum in num_trainsubjects:
+                count += 1
 
+                # hyperparameters
+                layers = layer
+                filt_num = filt
+                kernel_size = ker
 
-# create model
-input = tf.keras.Input(shape=INPUT_SHAPE, name='input')
+                print(trainnum, filt_num, kernel_size, layers)
 
-block1 = separable_convolution_3D(input, kernel_size=5, filter_num=filter_num1, name='block1_',
-                                  activation='relu', dropout_rate=DROPOUT_RATE)
-block2 = separable_convolution_3D(block1, kernel_size=3, filter_num=filter_num2, name='block2_',
-                                  activation='relu', dropout_rate=DROPOUT_RATE)
-block3 = separable_convolution_3D(block2, kernel_size=3, filter_num=filter_num3, name='block3_',
-                                  activation='relu', dropout_rate=DROPOUT_RATE)
+                # select the random subset of training subjects from the training set is trainnum<300
+                random.seed(6)
+                TRAIN_SUBIDS = random.sample(SUBIDS, k=trainnum)
 
-output = separable_convolution_3D(block3, kernel_size=3, filter_num=1, name='block4_',
-                                  activation=None, dropout_rate=DROPOUT_RATE)
-model = tf.keras.Model(inputs=[input], outputs=[output])
+                # set up logging
+                LOGDIR = os.path.join(DATA_PATH + "/logs/unet/param_test/",
+                                      TASK_FILE_NAME + TASK_FILE_NUM, datetime.now().strftime("%Y%m%d"),
+                                      datetime.now().strftime("%H%M%S") + '_layers' + str(layers) + '_nfilt' + str(
+                                          filt_num) + '_kersz' + str(kernel_size) + '_ntrain' + str(
+                                          trainnum) + '_do' + str(DROPOUT_RATE) + '_bn' + str(batchnorm))
+                os.makedirs(os.path.join(LOGDIR, "checkpoints"), exist_ok=False)
+                CHECKPOINT_PATH = os.path.join(LOGDIR, "checkpoints", "cp-{epoch:04d}.ckpt")
 
-# create callbacks
-tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=LOGDIR)
-cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=CHECKPOINT_PATH, save_weights_only=False, period=5)
+                # create datasets
+                train_dataset = NiiSequence(TRAIN_SUBIDS, shuffle=True, rootpath=DATA_PATH, dataname=REST_FILE_NAME,
+                                            labelname=TASK_FILE_NAME, labelnum=TASK_FILE_NUM, batch_size=BATCH_SIZE,
+                                            thresh=None)
+                valid_dataset = NiiSequence(VALID_SUBIDS, rootpath=DATA_PATH, dataname=REST_FILE_NAME,
+                                            labelname=TASK_FILE_NAME, labelnum=TASK_FILE_NUM,
+                                            batch_size=BATCH_SIZE, thresh=None)
+                test_dataset = NiiSequence(TEST_SUBIDS, rootpath=DATA_PATH, dataname=REST_FILE_NAME,
+                                           labelname=TASK_FILE_NAME, labelnum=TASK_FILE_NUM,
+                                           batch_size=1, thresh=None)
 
-# compile model for training
-model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-              # Loss function to minimize
-              loss=tf.keras.losses.MeanSquaredError(),
-              # List of metrics to monitor
-              metrics=[tf.keras.losses.MeanSquaredError(), tf.keras.metrics.MeanAbsoluteError(), CorrelationMetric()])
-model.summary()
+                # create unet model
+                model = create_unet_model3D(input_image_size=INPUT_SHAPE, n_labels=32, layers=layers,
+                                            mode='regression', output_activation='linear', strides=(1, 1, 1),
+                                            pool_size=(2, 2, 2), lowest_resolution=filt_num, init_lr=init_lr,
+                                            convolution_kernel_size=(kernel_size, kernel_size, kernel_size),
+                                            deconvolution_kernel_size=(kernel_size, kernel_size, kernel_size),
+                                            dropout=DROPOUT_RATE, batchnorm=batchnorm, dropout_type='spatial',
+                                            activation='relu', use_deconvolution=False)
 
-# save model architecture in json
-model_json = model.to_json()
-with open(LOGDIR + "\\model.json", "w") as json_file:
-    json_file.write(model_json)
+                # create callbacks
+                tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=LOGDIR, profile_batch=0)
+                cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=CHECKPOINT_PATH, monitor='val_correlation_gm',
+                                                                 mode='max', save_best_only=True,
+                                                                 save_weights_only=True)
+                stop_callback = tf.keras.callbacks.EarlyStopping(monitor='val_correlation_gm', min_delta=0, patience=20,
+                                                                 verbose=0, mode='max', baseline=None,
+                                                                 restore_best_weights=True)
 
-# training loop
-model.fit(train_dataset, epochs=EPOCH, validation_data=valid_dataset, callbacks=[tensorboard_callback, cp_callback])
+                model.summary()
 
-# evaluate on the test set
-test_loss = model.evaluate(test_dataset)
-print(test_loss)
+                # save model architecture in json
+                model_json = model.to_json()
+                with open(LOGDIR + "/model.json", "w") as json_file:
+                    json_file.write(model_json)
 
-# predict on test data
-predicted_batch = model.predict(test_dataset)
-save_prediction(predicted_batch=predicted_batch, rootpath=DATA_PATH, labelname=TASK_FILE_NAME,
-                template_subID=TEST_SUBIDS[0], subIDs=TEST_SUBIDS)
+                # training loop
+                model.fit(train_dataset, epochs=EPOCH, validation_data=valid_dataset,
+                          callbacks=[tensorboard_callback, cp_callback, stop_callback])
+
+                # evaluate on the test and val sets
+                test_loss = model.evaluate(test_dataset)
+                # cc_mean_test[layernum][kernum][filtnum] = test_loss[2]
+                cc_mean_test_1D[count] = test_loss[2]
+
+                val_loss = model.evaluate(valid_dataset)
+                # cc_mean_val[layernum][kernum][filtnum] = val_loss[2]
+                cc_mean_val_1D[count] = val_loss[2]
+
+                # predict on test data
+                predicted_batch = model.predict(test_dataset)
+                test_batch = load_nifti(TEST_SUBIDS, rootpath=DATA_PATH,
+                                        labelname=TASK_FILE_NAME, labelnum=TASK_FILE_NUM)
+                save_prediction(predicted_batch=predicted_batch, rootpath=DATA_PATH, outpath=OUT_PATH,
+                                labelname=TASK_FILE_NAME, labelnum=TASK_FILE_NUM,
+                                template_subID=TEST_SUBIDS[0], subIDs=TEST_SUBIDS)
+                cc = act_pred_corr(predicted_batch, test_batch)
+
+                print(np.mean(np.diagonal(cc)))
+
+            # cc_norm = normalize(cc,axis=0)
+            # cc_norm = normalize(cc_norm,axis=1)
+            # plt.subplot(1, 2, 1)
+            # plt.imshow(cc,cmap="jet")
+            # plt.colorbar()
+            # plt.subplot(1, 2, 2)
+            # plt.imshow(cc_norm,cmap="jet")
+            # plt.colorbar()
+            # plt.show()
+
+print(cc_mean_test_1D)
+print(cc_mean_val_1D)
+# with open('/media/Drobo_HCP/HCP_Data/Volume/cc_param_test.pkl', 'wb') as f:  # Python 3: open(..., 'wb')
+#    pickle.dump([cc_mean_test_1D, cc_mean_1D_val], f)
