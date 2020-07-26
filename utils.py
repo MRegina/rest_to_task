@@ -18,11 +18,11 @@ from tensorflow.keras.layers import (Input, Conv2D, Conv2DTranspose,
 from tensorflow.keras import optimizers as opt
 from tensorflow.keras import backend as K
 
+grey_matter_mask = '/data/Templates/Yeo2011_17Networks_2mm_LiberalMask_64.nii.gz'
+
 
 # correlation calculation for keras metric and loss classes
 def correlation(y_true, y_pred, sample_weight=None):
-    # assert len(y_true.shape)==5
-
     #### GET RID OF ZEROS ####
     y_true = tf.cast(y_true, tf.float32)
     y_pred = tf.cast(y_pred, tf.float32)
@@ -48,47 +48,23 @@ def correlation(y_true, y_pred, sample_weight=None):
         std_y = tf.sqrt(tf.reduce_sum(tf.square(demean_ytrue)) * tf.reduce_sum(tf.square(demean_ypred)))
         correlation = tf.reduce_sum(demean_ytrue * demean_ypred) / std_y
 
-    # tf.print("correlation:", correlation,output_stream=sys.stdout)
-
-    # tf.print("correlation:", correlation)
     return tf.maximum(tf.minimum(correlation, 1.0), -1.0)
 
 
+# calculate correlation based on predefined activation threshold
 def correlation_thresh(y_true, y_pred, thresh=2.58, sample_weight=None):
-    y_true = tf.cast(y_true, tf.float32)
-    y_pred = tf.cast(y_pred, tf.float32)
-
     #### THRESHOLD DATA ####
-    data_intersect = tf.cast(tf.math.greater(y_true, thresh), dtype=tf.float32) * y_pred
-    mask_intersect = tf.cast(data_intersect, dtype=tf.bool)
-    y_true = tf.boolean_mask(y_true, mask_intersect)
-    y_pred = tf.boolean_mask(y_pred, mask_intersect)
-
-    mean_ytrue = tf.reduce_mean(y_true, keepdims=True)
-    mean_ypred = tf.reduce_mean(y_pred, keepdims=True)
-
-    demean_ytrue = y_true - mean_ytrue
-    demean_ypred = y_pred - mean_ypred
-
-    if sample_weight is not None:
-        sample_weight = tf.broadcast_weights(sample_weight, y_true)
-        std_y = tf.sqrt(tf.reduce_sum(sample_weight * tf.square(demean_ytrue)) * tf.reduce_sum(
-            sample_weight * tf.square(demean_ypred)))
-        correlation = tf.reduce_sum(sample_weight * demean_ytrue * demean_ypred) / std_y
-    else:
-        std_y = tf.sqrt(tf.reduce_sum(tf.square(demean_ytrue)) * tf.reduce_sum(tf.square(demean_ypred)))
-        correlation = tf.reduce_sum(demean_ytrue * demean_ypred) / std_y
-
-    # tf.print("correlation:", correlation,output_stream=sys.stdout)
-
-    return tf.maximum(tf.minimum(correlation, 1.0), -1.0)
+    y_true = tf.cast(y_true, tf.float32)
+    y_true_thresholded = tf.cast(tf.math.greater(y_true, thresh), dtype=tf.float32)
+    return correlation(y_true_thresholded, y_pred, sample_weight)
 
 
+# calculate correlation restricted to grey matter voxels
 def correlation_gm(y_true, y_pred, sample_weight=None):
-    sz = K.ndim(y_true)
-    gm = nibabel.load('/data/Templates/Yeo2011_17Networks_2mm_LiberalMask_64.nii.gz').get_fdata()
+    num_dims = K.ndim(y_true)
+    gm = nibabel.load(grey_matter_mask).get_fdata()
 
-    if K.eval(sz) == 5:
+    if K.eval(num_dims) == 5:
         gm = np.expand_dims(gm, axis=[0, -1])
 
     gm = tf.cast(gm, tf.bool)
@@ -97,26 +73,12 @@ def correlation_gm(y_true, y_pred, sample_weight=None):
     y_true = tf.boolean_mask(y_true, gm)
     y_pred = tf.boolean_mask(y_pred, gm)
 
-    mean_ytrue = tf.reduce_mean(y_true, keepdims=True)
-    mean_ypred = tf.reduce_mean(y_pred, keepdims=True)
-
-    demean_ytrue = y_true - mean_ytrue
-    demean_ypred = y_pred - mean_ypred
-
-    if sample_weight is not None:
-        sample_weight = tf.broadcast_weights(sample_weight, y_true)
-        std_y = tf.sqrt(tf.reduce_sum(sample_weight * tf.square(demean_ytrue)) * tf.reduce_sum(
-            sample_weight * tf.square(demean_ypred)))
-        correlation = tf.reduce_sum(sample_weight * demean_ytrue * demean_ypred) / std_y
-    else:
-        std_y = tf.sqrt(tf.reduce_sum(tf.square(demean_ytrue)) * tf.reduce_sum(tf.square(demean_ypred)))
-        correlation = tf.reduce_sum(demean_ytrue * demean_ypred) / std_y
-
-    return tf.maximum(tf.minimum(correlation, 1.0), -1.0)
+    return correlation(y_true, y_pred, sample_weight)
 
 
+# calculate mean squared error restricted to gray matter voxels
 def mse_gm(y_true, y_pred):
-    gm = nibabel.load('/data/Templates/Yeo2011_17Networks_2mm_LiberalMask_64.nii.gz').get_fdata()
+    gm = nibabel.load(grey_matter_mask).get_fdata()
     gm = np.expand_dims(gm, axis=[0, 4])
     gm = tf.cast(gm, tf.bool)
 
@@ -136,8 +98,8 @@ class CorrelationMetric(tf.keras.metrics.Metric):
         self.correlation = self.add_weight(name='correlation', initializer='zeros')
 
     def update_state(self, y_true, y_pred, sample_weight=None):
-        correlation = correlation(y_true, y_pred, sample_weight=None)
-        self.correlation.assign(correlation)
+        corr = correlation(y_true, y_pred, sample_weight)
+        self.correlation.assign(corr)
 
     def result(self):
         return self.correlation
@@ -146,7 +108,7 @@ class CorrelationMetric(tf.keras.metrics.Metric):
 # correlation as loss function
 class CorrelationLoss(tf.keras.losses.Loss):
     def call(self, y_true, y_pred, sample_weight=None):
-        corr = correlation(y_true, y_pred, sample_weight=None)
+        corr = correlation(y_true, y_pred, sample_weight)
         return 1.0 - corr
 
 
@@ -180,13 +142,15 @@ class NiiSequence(tf.keras.utils.Sequence):
                 label = nibabel.load(
                     self.rootpath + subID + '/task/tfMRI_' + self.labelname + '/tfMRI_' + self.labelname + '_hp200_s4_level2vol.feat/cope' + self.labelnum + '.feat/stats/zstat1_64.nii.gz').get_fdata()
 
+            # if grey matter mask should be applied to the ground truth data
             if self.thresh == 'GM' or self.thresh == 'gm' or self.thresh == 'Gm':
-                gm = nibabel.load('/data/Templates/Yeo2011_17Networks_2mm_LiberalMask_64.nii.gz').get_fdata()
+                gm = nibabel.load(grey_matter_mask).get_fdata()
                 gm = (gm >= 1) * 1
                 gm = gm.astype(np.int8)
                 label = label * gm
                 gm = np.tile(np.expand_dims(gm, axis=3), 32)
                 data = data * gm
+            # if activation thresholding should be applied to the ground truth data
             elif self.thresh is not None:
                 label = K.greater(label, self.thresh)
                 label = K.cast(label, "int64")
@@ -199,6 +163,7 @@ class NiiSequence(tf.keras.utils.Sequence):
 
         if self.batch_size > 1:
             return np.stack(data_batch, axis=0), np.stack(label_batch, axis=0)
+        # in case of batchsize==1
         else:
             if self.labelname is not None:
                 return np.expand_dims(data, axis=0), np.expand_dims(label, axis=0)
@@ -207,9 +172,9 @@ class NiiSequence(tf.keras.utils.Sequence):
 
 
 # save predicted images in niftii format for later tests and visual checking
-def save_prediction(predicted_batch, rootpath, outpath, template_subID, labelname, labelnum, batch_id=None,
-                    subIDs=None):
-    template_img = nibabel.load('/media/Drobo_HCP/HCP_Data/Volume/CNN/100307_motor1_64.nii.gz')
+def save_prediction(predicted_batch, outpath, labelname, labelnum, batch_id=None, subIDs=None,
+                    template_img_path='/media/Drobo_HCP/HCP_Data/Volume/CNN/100307_motor1_64.nii.gz'):
+    template_img = nibabel.load(template_img_path)
     batch_size = predicted_batch.shape[0]
     for i in range(batch_size):
         new_img = nibabel.Nifti1Image(predicted_batch[i, :, :, :, :], template_img.affine)
@@ -222,25 +187,8 @@ def save_prediction(predicted_batch, rootpath, outpath, template_subID, labelnam
         nibabel.save(new_img, filename)
 
 
-# save predicted images in niftii format for later tests and visual checking
-def save_prediction_batch(predicted_batch, rootpath, outpath, template_subID, labelname, labelnum, numtrain,
-                          batch_id=None, subIDs=None):
-    os.makedirs(outpath, exist_ok=True)
-    template_img = nibabel.load(rootpath + 'CNN/100307_motor1_64.nii.gz')
-    batch_size = predicted_batch.shape[0]
-    for i in range(batch_size):
-        # new_img = nibabel.Nifti1Image(predicted_batch[i, :, :, :, :], template_img.affine, template_img.header)
-        new_img = nibabel.Nifti1Image(predicted_batch[i, :, :, :, :], template_img.affine)
-        if subIDs is not None:
-            filename = outpath + subIDs[i] + '_predicted_' + str(numtrain) + '_UNET.nii.gz'
-        elif batch_id is not None:
-            filename = outpath + str(batch_id * batch_size + i) + '_predicted_' + str(numtrain) + '_UNET.nii.gz'
-        else:
-            filename = outpath + str(i) + '_predicted_' + str(numtrain) + '_UNET.nii.gz'
-        nibabel.save(new_img, filename)
-
-
-def load_nifti(test_ids, rootpath, labelname, labelnum, batch_id=None, subIDs=None, thresh=None):
+# load a batch of nifti files for test subjects
+def load_nifti(test_ids, rootpath, labelname, labelnum, thresh=None):
     test_batch = []
     for i in range(len(test_ids)):
         # print(test_ids[i])
@@ -253,8 +201,8 @@ def load_nifti(test_ids, rootpath, labelname, labelnum, batch_id=None, subIDs=No
     return np.array(test_batch)
 
 
+# calculate grey matter masked correlation between batches of predictions and ground truth
 def act_pred_corr(predicted_batch, task_batch):
-    # template_img =nibabel.load(rootpath + template_subID + '/task/tfMRI_' + labelname + '/tfMRI_' + labelname + '_hp200_s4_level2vol.feat/cope' + labelnum + '.feat/stats/tstat1.nii.gz').get_fdata()
     cc = np.zeros((predicted_batch.shape[0], task_batch.shape[0]))
     for i in range(predicted_batch.shape[0]):
         for j in range(task_batch.shape[0]):
@@ -279,7 +227,8 @@ def create_unet_model3D(input_image_size,
                         init_lr=0.0001,
                         dropout=0.2,
                         dropout_type='spatial',
-                        batchnorm=False):
+                        batchnorm=False,
+                        use_deconvolution=False):
     """
     Create a 3D Unet model
     Example
@@ -318,12 +267,13 @@ def create_unet_model3D(input_image_size,
         if batchnorm is True:
             conv = BatchNormalization(axis=4)(conv)
 
+        # collect conv outputs to a list
         conv_tot += 1
         encoding_convolution_layers.append(Conv3D(filters=number_of_filters,
                                                   kernel_size=convolution_kernel_size,
                                                   activation=activation,
                                                   padding='same', name='conv3d_' + str(conv_tot))(conv))
-
+        # apply maxpooling
         if i < len(layers) - 1:
             pool = MaxPooling3D(pool_size=pool_size, name='pool_' + str(i))(encoding_convolution_layers[i])
 
@@ -332,42 +282,35 @@ def create_unet_model3D(input_image_size,
     conv_tot += 1
     print(conv_tot)
     for j in range(1, len(layers)):
-        if j < len(layers) - 1:
-            decon_kernel_size = deconvolution_kernel_size
-        else:
-            decon_kernel_size = deconvolution_kernel_size
-
         number_of_filters = lowest_resolution * 2 ** (len(layers) - layers[j] - 1)
-        tmp_deconv = Conv3DTranspose(filters=number_of_filters, kernel_size=decon_kernel_size,
-                                     padding='same', name='trans_' + str(j))(outputs)
-        tmp_deconv = UpSampling3D(size=pool_size, name='upsamp_' + str(j))(tmp_deconv)
+
+        # decide if transposed convolution or simple upsampling will happen
+        deconv_stride = 2 if use_deconvolution else 1
+
+        tmp_deconv = Conv3DTranspose(filters=number_of_filters, kernel_size=deconvolution_kernel_size,
+                                     strides=deconv_stride, padding='same', name='trans_' + str(j))(outputs)
+        if not use_deconvolution:
+            tmp_deconv = UpSampling3D(size=pool_size, name='upsamp_' + str(j))(tmp_deconv)
+
+        # concatenate low level featuremaps with the upsampled features
         outputs = Concatenate(axis=4, name='concat_' + str(j))(
             [tmp_deconv, encoding_convolution_layers[len(layers) - j - 1]])
 
-        conv_tot += 1
-        outputs = Conv3D(filters=number_of_filters, kernel_size=convolution_kernel_size,
-                         activation=activation, padding='same', name='conv3d_' + str(conv_tot))(outputs)
+        # two additional convolutions to process concatenated featuremaps
+        for k in range(2):
+            conv_tot += 1
+            outputs = Conv3D(filters=number_of_filters, kernel_size=convolution_kernel_size,
+                             activation=activation, padding='same', name='conv3d_' + str(conv_tot))(outputs)
 
-        if dropout is not None:
-            if dropout_type is 'spatial':
-                outputs = SpatialDropout3D(dropout)(outputs)
-            else:
-                outputs = Dropout(dropout)(outputs)
-        if batchnorm is True:
-            outputs = BatchNormalization(axis=4)(outputs)
+            if dropout is not None:
+                if dropout_type is 'spatial':
+                    outputs = SpatialDropout3D(dropout)(outputs)
+                else:
+                    outputs = Dropout(dropout)(outputs)
+            if batchnorm is True:
+                outputs = BatchNormalization(axis=4)(outputs)
 
-        conv_tot += 1
-        outputs = Conv3D(filters=number_of_filters, kernel_size=convolution_kernel_size,
-                         activation=activation, padding='same', name='conv3d_' + str(conv_tot))(outputs)
-
-        if dropout is not None:
-            if dropout_type is 'spatial':
-                outputs = SpatialDropout3D(dropout)(outputs)
-            else:
-                outputs = Dropout(dropout)(outputs)
-        if batchnorm is True:
-            outputs = BatchNormalization(axis=4)(outputs)
-
+    #UNET head can be either classification or regression
     if mode == 'classification':
         if number_of_classification_labels == 1:
             outputs = Conv3D(filters=number_of_classification_labels, kernel_size=(1, 1, 1),

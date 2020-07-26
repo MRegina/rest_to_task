@@ -18,8 +18,8 @@ import pickle
 DATA_PATH = '/media/Drobo_HCP/HCP_Data/Volume/'
 OUT_PATH = '/media/Drobo_HCP/HCP_Data/Volume/CNN/Predictions/'
 
-num_val = 50;
-num_test = 50;
+num_val = 50
+num_test = 50
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
@@ -34,39 +34,35 @@ if gpus:
         # Virtual devices must be set before GPUs have been initialized
         print(e)
 
-with open('/media/Drobo_HCP/HCP_Data/Volume/CNN/list_train_alltasks.txt') as f:
+#read in subject IDs for train, validation and test sets
+with open(DATA_PATH + '/CNN/list_train_alltasks.txt') as f:
     SUBIDS = f.read().split('\n')
 SUBIDS.pop()
 
-with open('/media/Drobo_HCP/HCP_Data/Volume/CNN/list_val_alltasks.txt') as f:
+with open(DATA_PATH + '/CNN/list_val_alltasks.txt') as f:
     VALID_SUBIDS = f.read().split('\n')
 VALID_SUBIDS.pop()
 
-with open('/media/Drobo_HCP/HCP_Data/Volume/CNN/list_test_alltasks.txt') as f:
+with open(DATA_PATH + '/CNN/list_test_alltasks.txt') as f:
     TEST_SUBIDS = f.read().split('\n')
 TEST_SUBIDS.pop()
 
-# print(TRAIN_SUBIDS)
-# print(VALID_SUBIDS)
-# print(TEST_SUBIDS)
 
 REST_FILE_NAME = '_DR2_4mm_64.nii.gz'
 TASK_FILE_NAME = 'RELATIONAL'
 TASK_FILE_NUM = '1'
-# output paths
+
 
 BATCH_SIZE = 1
-# INPUT_SHAPE = (96, 112, 96, 32)
-# OUTPUT_SIZE = (96, 112, 96, 1)
 INPUT_SHAPE = (64, 64, 64, 32)
 OUTPUT_SIZE = (64, 64, 64, 1)
+init_lr=0.0001
 
 numfilters = [96]
 kersize = [3]
 numlayers = [2]
 
-num_trains = [10, 20, 50, 100, 200, 300];
-# num_trains=[200];
+num_trainsubjects = [10, 20, 50, 100, 200, 300];
 cc_mean_test_1D = np.zeros((24))
 cc_mean_val_1D = np.zeros((24))
 
@@ -74,11 +70,13 @@ EPOCH = 300
 DROPOUT_RATE = None  # 0.1
 batchnorm = False
 
+
+#setup for gridsearch over hyperparameters
 count = -1
 for layer in numlayers:
     for ker in kersize:
         for filt in numfilters:
-            for trainnum in num_trains:
+            for trainnum in num_trainsubjects:
                 count += 1
 
                 # hyperparameters
@@ -87,17 +85,19 @@ for layer in numlayers:
                 kernel_size = ker
 
                 print(trainnum, filt_num, kernel_size, layers)
+
+                # select the random subset of training subjects from the training set is trainnum<300
                 random.seed(6)
                 TRAIN_SUBIDS = random.sample(SUBIDS, k=trainnum)
-                LOGDIR = os.path.join("/media/Drobo_HCP/HCP_Data/Volume/logs/unet/param_test/",
+
+                # set up logging
+                LOGDIR = os.path.join(DATA_PATH + "/logs/unet/param_test/",
                                       TASK_FILE_NAME + TASK_FILE_NUM, datetime.now().strftime("%Y%m%d"),
                                       datetime.now().strftime("%H%M%S") + '_layers' + str(layers) + '_nfilt' + str(
                                           filt_num) + '_kersz' + str(kernel_size) + '_ntrain' + str(
                                           trainnum) + '_do' + str(DROPOUT_RATE) + '_bn' + str(batchnorm))
                 os.makedirs(os.path.join(LOGDIR, "checkpoints"), exist_ok=False)
                 CHECKPOINT_PATH = os.path.join(LOGDIR, "checkpoints", "cp-{epoch:04d}.ckpt")
-
-                # tf.config.experimental_run_functions_eagerly(True)
 
                 # create datasets
                 train_dataset = NiiSequence(TRAIN_SUBIDS, shuffle=True, rootpath=DATA_PATH, dataname=REST_FILE_NAME,
@@ -113,15 +113,14 @@ for layer in numlayers:
                 # create unet model
                 model = create_unet_model3D(input_image_size=INPUT_SHAPE, n_labels=32, layers=layers,
                                             mode='regression', output_activation='linear', strides=(1, 1, 1),
-                                            pool_size=(2, 2, 2), lowest_resolution=filt_num, init_lr=0.0001,
+                                            pool_size=(2, 2, 2), lowest_resolution=filt_num, init_lr=init_lr,
                                             convolution_kernel_size=(kernel_size, kernel_size, kernel_size),
                                             deconvolution_kernel_size=(kernel_size, kernel_size, kernel_size),
                                             dropout=DROPOUT_RATE, batchnorm=batchnorm, dropout_type='spatial',
-                                            activation='relu')
+                                            activation='relu', use_deconvolution=False)
 
                 # create callbacks
                 tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=LOGDIR, profile_batch=0)
-                # cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=CHECKPOINT_PATH, save_weights_only=True, period=5)
                 cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=CHECKPOINT_PATH, monitor='val_correlation_gm',
                                                                  mode='max', save_best_only=True,
                                                                  save_weights_only=True)
@@ -159,6 +158,7 @@ for layer in numlayers:
                 cc = act_pred_corr(predicted_batch, test_batch)
 
                 print(np.mean(np.diagonal(cc)))
+
             # cc_norm = normalize(cc,axis=0)
             # cc_norm = normalize(cc_norm,axis=1)
             # plt.subplot(1, 2, 1)
